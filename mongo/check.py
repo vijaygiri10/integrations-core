@@ -9,6 +9,8 @@ import pymongo
 # project
 from checks import AgentCheck
 from urlparse import urlsplit
+from config import _is_affirmative
+from distutils.version import LooseVersion # pylint: disable=E0611,E0401
 
 DEFAULT_TIMEOUT = 30
 GAUGE = AgentCheck.gauge
@@ -624,6 +626,18 @@ class MongoDb(AgentCheck):
 
         return username, password, db_name, nodelist, clean_server_name, auth_source
 
+    def _collect_indexes_stats(self, instance, db, tags):
+        for coll_name in instance.get('collections', []):
+            try:
+                for stats in db[coll_name].aggregate([{"$indexStats": {}}], cursor={}):
+                    idx_tags = tags + [
+                        "name:{0}".format(stats.get('name', 'unknown')),
+                        "collection:{0}".format(coll_name),
+                    ]
+                    self.gauge('mongodb.collection.indexes.accesses.ops', int(stats.get('accesses', {}).get('ops', 0)), idx_tags)
+            except Exception as e:
+                self.log.error("Could not indexes stats for collection %s: %s", coll_name, e)
+
     def check(self, instance):
         """
         Returns a dictionary that looks a lot like what's sent back by
@@ -905,6 +919,13 @@ class MongoDb(AgentCheck):
                 submit_method, metric_name_alias = \
                     self._resolve_metric(metric_name, metrics_to_collect)
                 submit_method(self, metric_name_alias, val, tags=metrics_tags)
+
+        if _is_affirmative(instance.get('collections_indexes_stats')):
+            mongo_version = cli.server_info().get('version', '0.0')
+            if LooseVersion("3.2") >= LooseVersion(mongo_version):
+                self.log.error("'collections_indexes_stats' is only available starting from mongo 3.2: your mongo version is %s", mongo_version)
+            else:
+                self._collect_indexes_stats(instance, db, tags)
 
         # Report the usage metrics for dbs/collections
         if 'top' in additional_metrics:
